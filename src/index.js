@@ -1,44 +1,43 @@
 import 'dotenv/config';
-import { initStore } from './store.js';
+import { initStore, recordMessage } from './store.js';
 import { startSocket } from './connection.js';
 import { commands } from './commands.js';
 import { protect, isGroup } from './security.js';
 
 await initStore();
+let wiredSocket = null;
 
-let wired = null;
+async function processMessage(sock, message) {
+  try {
+    if (await commands(sock, message)) return;
+    await protect(sock, message);
+  } catch (error) {
+    console.error('[MESSAGE]', error?.message || 'تعذر معالجة الرسالة');
+  }
+}
 
 async function wire(sock) {
-  if (wired === sock) return;
-  wired = sock;
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+  if (wiredSocket === sock) return;
+  wiredSocket = sock;
+  sock.ev.on('messages.upsert', ({ messages, type }) => {
     if (type !== 'notify') return;
-
-    for (const message of messages) {
-      try {
-        if (!message?.message || message.key?.fromMe || !isGroup(message)) continue;
-        if (await commands(sock, message)) continue;
-        await protect(sock, message);
-      } catch (err) {
-        console.error('[MESSAGE]', err?.stack || err);
-      }
+    for (const message of messages || []) {
+      if (!message?.message || !isGroup(message)) continue;
+      recordMessage(message);
+      // Independent tasks prevent one slow message from blocking later ones.
+      void processMessage(sock, message);
     }
   });
 }
 
-process.on('uncaughtException', err => console.error('[UNCAUGHT]', err?.stack || err));
-process.on('unhandledRejection', err => console.error('[UNHANDLED]', err?.stack || err));
+process.on('uncaughtException', error => console.error('[FATAL]', error?.message || 'خطأ غير متوقع'));
+process.on('unhandledRejection', error => console.error('[ASYNC]', error?.message || 'خطأ غير متوقع'));
 
 async function boot() {
-  try {
-    await startSocket(wire);
-  } catch (err) {
-    console.error('[BOOT]', err?.stack || err);
-    // Keep the service alive and retry only for startup errors. Pairing
-    // timeout itself intentionally does not trigger an automatic re-pair.
+  try { await startSocket(wire); }
+  catch (error) {
+    console.error('[STARTUP]', error?.message || 'تعذر بدء الاتصال');
     setTimeout(() => void boot(), 5000);
   }
 }
-
 await boot();
